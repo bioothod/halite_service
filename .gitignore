@@ -1,0 +1,5 @@
+.cache
+.*.sw*
+halite
+models/*
+*.pb.go

@@ -1,0 +1,12 @@
+syntax = "proto2";
+
+import "session_manager.proto";
+import "service_config.proto";
+
+option go_package = "halite_config";
+package halite_config;
+
+message halite_config {
+    optional service_config service_config = 1;
+    optional session_manager_config session_manager_config = 2;
+}

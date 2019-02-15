@@ -1,0 +1,15 @@
+syntax = "proto2";
+
+option go_package = "halite_config";
+package halite_config;
+
+message service_config {
+	required string address = 1; // format address:port
+
+	required string train_dir = 2;
+
+	optional int32 max_episodes_per_client = 3 [default = 30];
+	optional int32 max_episodes_total = 4 [default = 1000];
+
+	optional float explore_eps = 5 [default = 0.999];
+}

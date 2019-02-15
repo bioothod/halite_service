@@ -1,0 +1,4 @@
+NAME="halite_service"
+VERSION="0.1.0"
+MAINTAINER="zbr@ioremap.net"
+GOPROJECT="github.com/bioothod/halite"

@@ -1,0 +1,57 @@
+syntax = "proto2";
+
+message hw_device_config {
+    required string name = 1; // device name, should follow TF convenion, i.e. /device:GPU:1
+    optional int32 priority = 2; // priority of this device compared to others, used for load balancing
+    optional int32 max_slots = 3; // maximum number of parallel operations run on this device
+}
+
+message hw_service_config {
+    required string name = 1; // name of the service used for per-request selection
+    required string model = 2; // model filename
+    repeated string devices = 3; // devices to bind this model to
+    repeated string inputs = 4; // input tensors
+    optional string checkpoint = 5; // checkpoint prefix
+}
+
+message session_manager_config {
+    /*
+     * limit number of parallel requests to inference() per selected device, this will be used as default if hw_device_config does not have @max_slots parameter,
+     * if zero, number of physical cores will be used
+     */
+    optional int32 parallel_slots_per_device = 1;
+
+    /*
+     * limit number of parallel requests to inference() to the whole session manager, i.e. for all bound services
+     * if zero, number of physical cores will be used
+     */
+    optional int32 parallel_slots_total = 2;
+
+    repeated hw_device_config device_config = 3;
+
+    /*
+     * if specified, this name will be used when requests do not specify particular service name
+     * if default name is not specified, the first one from the array will be used
+     */
+    optional string default_service_name = 4;
+    repeated hw_service_config services = 5;
+
+    /*
+     * The number of threads in the pool
+     *
+     * -1 means default TensorFlow behaviour will be applied (without specifying a pool)
+     * 0 means the system picks a value based on where this option proto is used
+     *
+     * See https://github.com/tensorflow/tensorflow/blob/v1.12.0/tensorflow/core/protobuf/config.proto#L259
+     * and https://github.com/tensorflow/tensorflow/blob/v1.12.0/tensorflow/core/protobuf/config.proto#L342
+     */
+    optional int32 num_threads = 6 [default = 1];
+
+    // maximum batch size for this setup
+    optional int32 max_batch_size = 7 [default = 100];
+
+    // default deadline timeout, this is an estimation of the request execution, if batch can not be fully collected
+    // until estimated deadline passes, it still will be executed even with incomplete batch.
+    // Timeout is in milliseconds.
+    optional int32 default_deadline_timeout_ms = 8 [default = 300];
+}
