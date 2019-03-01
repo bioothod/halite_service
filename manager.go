@@ -77,6 +77,7 @@ type SessionRun struct {
 	slot *ExecutionSlot
 	output_operations map[string]*OutputOperation
 	outputs []tf.Output
+	targets []*tf.Operation
 }
 
 type OutputOperation struct {
@@ -799,6 +800,7 @@ func (slot *ExecutionSlot) NewSessionRun() *SessionRun {
 		slot: slot,
 		output_operations: make(map[string]*OutputOperation),
 		outputs: make([]tf.Output, 0),
+		targets: make([]*tf.Operation, 0),
 	}
 }
 
@@ -823,6 +825,17 @@ func (run *SessionRun) AddOutput(name string, convert ConversionFunction) error 
 
 	return nil
 }
+
+func (run *SessionRun) AddTarget(name string) error {
+	op := run.slot.Graph().Operation(name)
+	if op == nil {
+		return fmt.Errorf("there is no output operation '%s'", name)
+	}
+
+	run.targets = append(run.targets, op)
+	return nil
+}
+
 
 func (run *SessionRun) Output(name string) (interface{}, error) {
 	op, ok := run.output_operations[name]
@@ -876,9 +889,9 @@ func (run *SessionRun) Run(input_tensors map[string]*tf.Tensor) error {
 		inputs[op.Output(0)] = input_tensor
 	}
 
-	res, err := run.slot.Session().Run(inputs, run.outputs, nil)
+	res, err := run.slot.Session().Run(inputs, run.outputs, run.targets)
 	if err != nil {
-		return fmt.Errorf("sessioin.Run() failed: %v", err)
+		return fmt.Errorf("session.Run() failed: %v", err)
 	}
 
 	if len(res) != len(run.outputs) {
