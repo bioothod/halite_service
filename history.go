@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/bioothod/halite/proto"
+	"math/rand"
 	"sync"
 )
 
@@ -17,6 +18,7 @@ type Entry struct {
 	Reward		float32
 	Action		int32
 	Step		int32
+	Logits		[]float32
 }
 
 func NewEntry(n *halite_proto.HistoryEntry) *Entry {
@@ -33,6 +35,7 @@ func NewEntry(n *halite_proto.HistoryEntry) *Entry {
 		Done: n.Done,
 		Reward: n.Reward,
 		Action: n.Action,
+		Logits: n.Logits,
 
 		Step: n.Step,
 	}
@@ -49,7 +52,7 @@ type Episode struct {
 func NewEpisode() *Episode {
 	return &Episode {
 		Completed: false,
-		Entries: make([]*Entry, 0, 40),
+		Entries: make([]*Entry, 0, 100),
 	}
 }
 
@@ -61,8 +64,6 @@ func (ep *Episode) Append(e *Entry) {
 }
 
 type HistoryStorage struct {
-	sync.Mutex
-
 	OwnerId int32
 	EnvId int32
 
@@ -80,14 +81,12 @@ func NewHistoryStorage(owner_id, env_id int32, max_episodes int) *HistoryStorage
 }
 
 func (hs *HistoryStorage) AppendEntry(e *Entry) {
-	hs.Lock()
-	defer hs.Unlock()
-
 	var ep *Episode
 	if len(hs.Episodes) > 0 {
 		ep = hs.Episodes[len(hs.Episodes) - 1]
 	} else {
 		ep = NewEpisode()
+		hs.Episodes = append(hs.Episodes, ep)
 	}
 
 	if ep.Completed {
@@ -146,4 +145,56 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 	diff := len(hs.Episodes) - prev_episodes
 
 	h.NumEpisodes += diff
+}
+
+// fixed trajectory len
+func (h *History) Sample(trlen int, max_batch_size int) ([]*Episode) {
+	h.Lock()
+	defer h.Unlock()
+
+	num_episodes := 0
+	for _, st := range h.Clients {
+		num_episodes += len(st.Episodes)
+	}
+
+	episodes := make([]*Episode, 0, num_episodes)
+	for _, st := range h.Clients {
+		for _, ep := range st.Episodes {
+			if len(ep.Entries) > trlen {
+				episodes = append(episodes, ep)
+			}
+		}
+	}
+
+	rand.Shuffle(len(episodes), func(i, j int) {
+		episodes[i], episodes[j] = episodes[j], episodes[i]
+	})
+
+	if max_batch_size > len(episodes) {
+		max_batch_size = len(episodes)
+	}
+
+	if max_batch_size == 0 {
+		return nil
+	}
+
+	ret := make([]*Episode, 0, max_batch_size)
+	for _, ep := range episodes {
+		start := rand.Intn(len(ep.Entries))
+		end := len(ep.Entries)
+
+		if end - start < trlen {
+			start = end - trlen
+		} else {
+			end = start + trlen
+		}
+
+		copy_ep := &Episode {
+			Completed: false,
+			Entries: ep.Entries[start:end],
+		}
+		ret = append(ret, copy_ep)
+	}
+
+	return ret
 }
