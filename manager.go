@@ -483,6 +483,19 @@ func (ctx *SessionManager) CheckWildcardDevices(devices []string) []string {
 	return new_devices
 }
 
+func StoreVariablesIntoCheckpoint(graph *tf.Graph, sess *tf.Session, prefix string) (string, error) {
+	t, err := tf.NewTensor(prefix)
+	if err != nil {
+		return "", err
+	}
+	o := graph.Operation("save/Const").Output(0)
+	ret, err := sess.Run(map[tf.Output]*tf.Tensor{o: t}, []tf.Output{graph.Operation("save/control_dependency").Output(0)}, nil)
+	if err != nil {
+		return "", err
+	}
+	return ret[0].Value().(string), nil
+}
+
 func restore_variables_from_checkpoint(graph *tf.Graph, sess *tf.Session, path string) error {
 	t, err := tf.NewTensor(path)
 	if err != nil {
