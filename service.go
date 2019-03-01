@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	//"google.golang.org/grpc/codes"
 	//"google.golang.org/grpc/status"
+	"io/ioutil"
 	"math/rand"
 	"net"
 	"rndgit.msk/goservice/log"
@@ -72,75 +75,53 @@ func (ctx *ServiceContext) qvals_to_tensor(batch *halite_proto.StateBatch) (*Exe
 	return slot, input_tensors, nil
 }
 
-func (ctx *ServiceContext) Inference(_ctx context.Context, batch *halite_proto.StateBatch) (*halite_proto.QvalsBatch, error) {
-	slot, input_tensors, err := ctx.qvals_to_tensor(batch)
+func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto.Status) (*halite_proto.FrozenGraph, error) {
+	var b bytes.Buffer
+	bwriter := bufio.NewWriter(&b)
+
+	slot, err := ctx.sm.GetExecutionSlot("", 1)
 	if err != nil {
-		log.Errorf("inference: could not convert qvals: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("could not get execution slot: %v", err)
 	}
 	defer slot.Cleanup()
 
-	run := slot.NewSessionRun()
-
-	run.AddOutput("output/qval_follower", ConvertToArrayOfFloat32)
-
-	err = run.Run(input_tensors)
+	_, err = slot.Graph().WriteTo(bwriter)
 	if err != nil {
-		return nil, fmt.Errorf("inference: can not run: %v", err)
+		return nil, fmt.Errorf("could not serialize graph_def: %v", err)
 	}
+	bwriter.Flush()
 
-	_qvals_follower, _ := run.Output("output/qval_follower")
-	qvals_follower := _qvals_follower.([][]float32)
+	prefix := "model.ckpt"
 
-	if len(qvals_follower) != len(batch.Batch) {
-		return nil, fmt.Errorf("inference: network returned invalid batch: returned batch: %d, requested batch: %d", len(qvals_follower), len(batch.Batch))
-	}
-
-	qvals_batch := &halite_proto.QvalsBatch {
-		Batch: make([]*halite_proto.Qvals, len(qvals_follower)),
-	}
-
-	for i, qvals := range qvals_follower {
-		qvals_batch.Batch[i] = &halite_proto.Qvals {
-			Qvals: qvals,
-		}
-	}
-
-	return qvals_batch, nil
-}
-
-func (ctx *ServiceContext) GetActions(_ctx context.Context, batch *halite_proto.StateBatch) (*halite_proto.ActionBatch, error) {
-	slot, input_tensors, err := ctx.qvals_to_tensor(batch)
+	checkpoint, err := StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
 	if err != nil {
-		log.Errorf("get_actions: could not convert qvals: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
 	}
-	defer slot.Cleanup()
 
-	run := slot.NewSessionRun()
-
-	run.AddOutput("output/action", ConvertToInt32)
-
-	err = run.Run(input_tensors)
+	index_file := fmt.Sprintf("%s.index", checkpoint)
+	checkpoint_index, err := ioutil.ReadFile(index_file)
 	if err != nil {
-		log.Errorf("get_action: can not run: %v", err)
-		return nil, fmt.Errorf("get_action: can not run: %v", err)
+		return nil, fmt.Errorf("could not read checkpoint index file '%s': %v", index_file, err)
+	}
+	data_file := fmt.Sprintf("%s.data-00000-of-00001", checkpoint)
+	checkpoint_data, err := ioutil.ReadFile(data_file)
+	if err != nil {
+		return nil, fmt.Errorf("could not read checkpoint data file '%s': %v", data_file, err)
+	}
+	saver_def_file := fmt.Sprintf("saver_def.pb")
+	saver_def, err := ioutil.ReadFile(saver_def_file)
+	if err != nil {
+		return nil, fmt.Errorf("could not read saver_def file '%s': %v", saver_def_file, err)
 	}
 
-	_actions, _ := run.Output("output/action")
-	actions := _actions.([]int32)
-
-	if len(actions) != len(batch.Batch) {
-		err = fmt.Errorf("get_action: network returned invalid batch: returned batch: %d, requested batch: %d", len(actions), len(batch.Batch))
-		log.Errorf("%v", err)
-		return nil, err
-	}
-
-	action_batch := &halite_proto.ActionBatch {
-		Actions: actions,
-	}
-
-	return action_batch, nil
+	log.Infof("saved model: graph_def: %d, checkpoint: %s, index: %d, data: %d, saver_def: %d", b.Len(), checkpoint, len(checkpoint_index), len(checkpoint_data), len(saver_def))
+	return &halite_proto.FrozenGraph {
+		GraphDef: b.Bytes(),
+		Prefix: prefix,
+		SaverDef: saver_def,
+		CheckpointIndex: checkpoint_index,
+		CheckpointData: checkpoint_data,
+	}, nil
 }
 
 func (ctx *ServiceContext) HistoryAppend(_ctx context.Context, he *halite_proto.HistoryEntry) (*halite_proto.Status, error) {
