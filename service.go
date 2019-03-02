@@ -117,6 +117,20 @@ func (ctx *ServiceContext) train() error {
 
 	log.Infof("sampled %d episodes", len(batch))
 
+	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+	if err != nil {
+		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
+	}
+	defer slot.Cleanup()
+
+	run := slot.NewSessionRun()
+
+	run.AddOutput("output/policy_gradient_loss", DefaultConvert)
+	run.AddOutput("output/baseline_loss", DefaultConvert)
+	run.AddOutput("output/cross_entropy_loss", DefaultConvert)
+	run.AddOutput("output/total_loss", DefaultConvert)
+	run.AddTarget("output/train_op")
+
 	for _, tr := range batch {
 		input_tensors := make(map[string]*tf.Tensor)
 
@@ -170,20 +184,6 @@ func (ctx *ServiceContext) train() error {
 			return fmt.Errorf("could not convert input rewards into tensor: %v", err)
 		}
 		input_tensors["learning_rate_ph"], err = tf.NewTensor(float32(0.001))
-
-		slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
-		if err != nil {
-			return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
-		}
-		defer slot.Cleanup()
-
-		run := slot.NewSessionRun()
-
-		run.AddOutput("output/policy_gradient_loss", DefaultConvert)
-		run.AddOutput("output/baseline_loss", DefaultConvert)
-		run.AddOutput("output/cross_entropy_loss", DefaultConvert)
-		run.AddOutput("output/total_loss", DefaultConvert)
-		run.AddTarget("output/train_op")
 
 		err = run.Run(input_tensors)
 		if err != nil {
