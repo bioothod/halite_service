@@ -81,6 +81,12 @@ func NewHistoryStorage(owner_id, env_id int32, max_episodes int) *HistoryStorage
 }
 
 func (hs *HistoryStorage) AppendEntry(e *Entry) {
+	if len(hs.Episodes) > hs.MaxEpisodes {
+		start := len(hs.Episodes) / 10 + 1
+
+		hs.Episodes = hs.Episodes[start : len(hs.Episodes)]
+	}
+
 	var ep *Episode
 	if len(hs.Episodes) > 0 {
 		ep = hs.Episodes[len(hs.Episodes) - 1]
@@ -92,15 +98,6 @@ func (hs *HistoryStorage) AppendEntry(e *Entry) {
 	if ep.Completed {
 		ep = NewEpisode()
 		hs.Episodes = append(hs.Episodes, ep)
-
-		if len(hs.Episodes) > hs.MaxEpisodes {
-			start := len(hs.Episodes) / 50 + 1
-			if start > len(hs.Episodes) {
-				start = len(hs.Episodes) / 2
-			}
-
-			hs.Episodes = hs.Episodes[start : len(hs.Episodes)]
-		}
 	}
 
 	ep.Append(e)
@@ -111,7 +108,6 @@ type History struct {
 
 	MaxEpisodesPerStorage int
 	MaxEpisodesTotal int
-	NumEpisodes int
 
 	Clients map[int32]*HistoryStorage
 }
@@ -120,7 +116,6 @@ func NewHistory(max_episodes_per_storage, max_episodes_total int) *History {
 	return &History {
 		MaxEpisodesPerStorage: max_episodes_per_storage,
 		MaxEpisodesTotal: max_episodes_total,
-		NumEpisodes: 0,
 
 		Clients: make(map[int32]*HistoryStorage),
 	}
@@ -140,11 +135,7 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 		h.Clients[idx] = hs
 	}
 
-	prev_episodes := len(hs.Episodes)
 	hs.AppendEntry(e)
-	diff := len(hs.Episodes) - prev_episodes
-
-	h.NumEpisodes += diff
 }
 
 // fixed trajectory len
