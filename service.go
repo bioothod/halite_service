@@ -200,7 +200,7 @@ func (ctx *ServiceContext) train() error {
 		ctx.train_step += 1
 
 		if ctx.train_step % 1000 == 0 {
-			prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir)
+			prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir, ctx.train_step)
 
 			_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
 			if err != nil {
