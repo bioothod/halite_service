@@ -112,16 +112,16 @@ func (ctx *ServiceContext) train() error {
 
 	log.Infof("sampled %d episodes", len(batch))
 
-	input_tensors := make(map[string]*tf.Tensor)
-
-	input_states := NewTensorSources(trlen)
-	input_params := NewTensorSources(trlen)
-	input_logits := make([][]float32, 0, trlen)
-	input_actions := make([]int32, 0, trlen)
-	input_rewards := make([]float32, 0, trlen)
-	input_dones := make([]bool, 0, trlen)
-
 	for _, tr := range batch {
+		input_tensors := make(map[string]*tf.Tensor)
+
+		input_states := NewTensorSources(trlen)
+		input_params := NewTensorSources(trlen)
+		input_logits := make([][]float32, 0, trlen)
+		input_actions := make([]int32, 0, trlen)
+		input_rewards := make([]float32, 0, trlen)
+		input_dones := make([]bool, 0, trlen)
+
 		for _, e := range tr.Entries {
 			sw := &BatchWrapper {
 				batch: e.OldState.State,
@@ -138,74 +138,74 @@ func (ctx *ServiceContext) train() error {
 			input_rewards = append(input_rewards, e.Reward)
 			input_dones = append(input_dones, e.Done)
 		}
-	}
 
-	var err error
-	input_tensors["input/map"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_states.NumSources())}, ctx.state_shape...), input_states.NewReader())
-	if err != nil {
-		return fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
-	}
-	input_tensors["input/params"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_params.NumSources())}, ctx.params_shape...), input_params.NewReader())
-	if err != nil {
-		return fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.params_shape, err)
-	}
-	input_tensors["input/policy_logits"], err = tf.NewTensor(input_logits)
-	if err != nil {
-		return fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.logits_shape, err)
-	}
-	input_tensors["input/action_taken"], err = tf.NewTensor(input_actions)
-	if err != nil {
-		return fmt.Errorf("could not convert input actions into tensor: %v", err)
-	}
-	input_tensors["input/done"], err = tf.NewTensor(input_dones)
-	if err != nil {
-		return fmt.Errorf("could not convert input dones into tensor: %v", err)
-	}
-	input_tensors["input/reward"], err = tf.NewTensor(input_rewards)
-	if err != nil {
-		return fmt.Errorf("could not convert input rewards into tensor: %v", err)
-	}
-	input_tensors["learning_rate_ph"], err = tf.NewTensor(float32(0.001))
-
-	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
-	if err != nil {
-		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
-	}
-	defer slot.Cleanup()
-
-	run := slot.NewSessionRun()
-
-	run.AddOutput("output/policy_gradient_loss", DefaultConvert)
-	run.AddOutput("output/baseline_loss", DefaultConvert)
-	run.AddOutput("output/cross_entropy_loss", DefaultConvert)
-	run.AddOutput("output/total_loss", DefaultConvert)
-	run.AddTarget("output/train_op")
-
-	err = run.Run(input_tensors)
-	if err != nil {
-		return fmt.Errorf("could not run inference: %v", err)
-	}
-
-	_policy_gradient_loss, err := run.Output("output/policy_gradient_loss")
-	policy_gradient_loss := _policy_gradient_loss.(float32)
-	_baseline_loss, err := run.Output("output/baseline_loss")
-	baseline_loss := _baseline_loss.(float32)
-	_cross_entropy_loss, err := run.Output("output/cross_entropy_loss")
-	cross_entropy_loss := _cross_entropy_loss.(float32)
-	_total_loss, err := run.Output("output/total_loss")
-	total_loss := _total_loss.(float32)
-
-	log.Infof("train step: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e",
-		ctx.train_step, policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss)
-	
-	ctx.train_step += 1
-
-	if ctx.train_step % 1000 == 0 {
-		prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir)
-
-		_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
+		var err error
+		input_tensors["input/map"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_states.NumSources())}, ctx.state_shape...), input_states.NewReader())
 		if err != nil {
-			return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+			return fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
+		}
+		input_tensors["input/params"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_params.NumSources())}, ctx.params_shape...), input_params.NewReader())
+		if err != nil {
+			return fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.params_shape, err)
+		}
+		input_tensors["input/policy_logits"], err = tf.NewTensor(input_logits)
+		if err != nil {
+			return fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.logits_shape, err)
+		}
+		input_tensors["input/action_taken"], err = tf.NewTensor(input_actions)
+		if err != nil {
+			return fmt.Errorf("could not convert input actions into tensor: %v", err)
+		}
+		input_tensors["input/done"], err = tf.NewTensor(input_dones)
+		if err != nil {
+			return fmt.Errorf("could not convert input dones into tensor: %v", err)
+		}
+		input_tensors["input/reward"], err = tf.NewTensor(input_rewards)
+		if err != nil {
+			return fmt.Errorf("could not convert input rewards into tensor: %v", err)
+		}
+		input_tensors["learning_rate_ph"], err = tf.NewTensor(float32(0.001))
+
+		slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+		if err != nil {
+			return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
+		}
+		defer slot.Cleanup()
+
+		run := slot.NewSessionRun()
+
+		run.AddOutput("output/policy_gradient_loss", DefaultConvert)
+		run.AddOutput("output/baseline_loss", DefaultConvert)
+		run.AddOutput("output/cross_entropy_loss", DefaultConvert)
+		run.AddOutput("output/total_loss", DefaultConvert)
+		run.AddTarget("output/train_op")
+
+		err = run.Run(input_tensors)
+		if err != nil {
+			return fmt.Errorf("could not run inference: %v", err)
+		}
+
+		_policy_gradient_loss, err := run.Output("output/policy_gradient_loss")
+		policy_gradient_loss := _policy_gradient_loss.(float32)
+		_baseline_loss, err := run.Output("output/baseline_loss")
+		baseline_loss := _baseline_loss.(float32)
+		_cross_entropy_loss, err := run.Output("output/cross_entropy_loss")
+		cross_entropy_loss := _cross_entropy_loss.(float32)
+		_total_loss, err := run.Output("output/total_loss")
+		total_loss := _total_loss.(float32)
+
+		log.Infof("train step: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e",
+			ctx.train_step, policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss)
+		
+		ctx.train_step += 1
+
+		if ctx.train_step % 1000 == 0 {
+			prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir)
+
+			_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
+			if err != nil {
+				return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+			}
 		}
 	}
 
