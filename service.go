@@ -15,6 +15,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net"
+	"os"
 	"rndgit.msk/goservice/log"
 	"time"
 )
@@ -59,7 +60,7 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 	}
 	bwriter.Flush()
 
-	prefix := fmt.Sprintf("%s/tmp_model.ckpt", ctx.train_dir)
+	prefix := fmt.Sprintf("%s/%d.tmp_model.ckpt", ctx.train_dir, rand.Intn(100000))
 
 	checkpoint, err := StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
 	if err != nil {
@@ -67,11 +68,15 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 	}
 
 	index_file := fmt.Sprintf("%s.index", checkpoint)
+	data_file := fmt.Sprintf("%s.data-00000-of-00001", checkpoint)
+
+	defer os.Remove(index_file)
+	defer os.Remove(data_file)
+
 	checkpoint_index, err := ioutil.ReadFile(index_file)
 	if err != nil {
 		return nil, fmt.Errorf("could not read checkpoint index file '%s': %v", index_file, err)
 	}
-	data_file := fmt.Sprintf("%s.data-00000-of-00001", checkpoint)
 	checkpoint_data, err := ioutil.ReadFile(data_file)
 	if err != nil {
 		return nil, fmt.Errorf("could not read checkpoint data file '%s': %v", data_file, err)
