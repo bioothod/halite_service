@@ -24,8 +24,6 @@ const SERVICE_NAME = "halite_service"
 type ServiceContext struct {
 	sm  *SessionManager
 
-	explore_eps float32
-
 	state_shape []int64
 	params_shape []int64
 	logits_shape []int64
@@ -33,6 +31,9 @@ type ServiceContext struct {
 	h *History
 
 	train_step int
+
+	saver_def []byte
+	train_dir string
 }
 
 type BatchWrapper struct {
@@ -58,7 +59,7 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 	}
 	bwriter.Flush()
 
-	prefix := "model.ckpt"
+	prefix := fmt.Sprintf("%s/tmp_model.ckpt", ctx.train_dir)
 
 	checkpoint, err := StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
 	if err != nil {
@@ -75,19 +76,14 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 	if err != nil {
 		return nil, fmt.Errorf("could not read checkpoint data file '%s': %v", data_file, err)
 	}
-	saver_def_file := fmt.Sprintf("saver_def.pb")
-	saver_def, err := ioutil.ReadFile(saver_def_file)
-	if err != nil {
-		return nil, fmt.Errorf("could not read saver_def file '%s': %v", saver_def_file, err)
-	}
 
-	log.Infof("saved model: train_step: %d, graph_def: %d, checkpoint: %s, index: %d, data: %d, saver_def: %d",
-		ctx.train_step, b.Len(), checkpoint, len(checkpoint_index), len(checkpoint_data), len(saver_def))
+	log.Infof("sending model: train_step: %d, graph_def: %d, checkpoint: %s, index: %d, data: %d",
+		ctx.train_step, b.Len(), checkpoint, len(checkpoint_index), len(checkpoint_data))
 
 	return &halite_proto.FrozenGraph {
 		GraphDef: b.Bytes(),
 		Prefix: prefix,
-		SaverDef: saver_def,
+		SaverDef: ctx.saver_def,
 		CheckpointIndex: checkpoint_index,
 		CheckpointData: checkpoint_data,
 	}, nil
@@ -203,6 +199,16 @@ func (ctx *ServiceContext) train() error {
 		ctx.train_step, policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss)
 	
 	ctx.train_step += 1
+
+	if ctx.train_step % 1000 == 0 {
+		prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir)
+
+		_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
+		if err != nil {
+			return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+		}
+	}
+
 	return nil
 }
 
@@ -270,9 +276,17 @@ func main() {
 
 	rand.Seed(time.Now().UnixNano())
 
+	saver_def, err := ioutil.ReadFile(srv_config.GetSaverDef())
+	if err != nil {
+		log.Fatalf("could not read saver_def file '%s': %v", srv_config.GetSaverDef(), err)
+	}
+
+	log.Infof("saver def size: %d", len(saver_def))
+
 	ctx := &ServiceContext {
 		h: NewHistory(int(srv_config.GetMaxEpisodesPerClient()), int(srv_config.GetMaxEpisodesTotal())),
-		explore_eps: srv_config.GetExploreEps(),
+		saver_def : []byte(saver_def),
+		train_dir: srv_config.GetTrainDir(),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)

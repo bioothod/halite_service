@@ -11,5 +11,5 @@ message service_config {
 	optional int32 max_episodes_per_client = 3 [default = 30];
 	optional int32 max_episodes_total = 4 [default = 1000];
 
-	optional float explore_eps = 5 [default = 0.999];
+	required string saver_def = 5;
 }
