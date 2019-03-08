@@ -170,7 +170,7 @@ func (h *History) Sample(trlen int, max_batch_size int) ([]*Episode) {
 	}
 
 	ret := make([]*Episode, 0, max_batch_size)
-	for _, ep := range episodes {
+	for _, ep := range episodes[0 : max_batch_size] {
 		start := rand.Intn(len(ep.Entries))
 		end := len(ep.Entries)
 
