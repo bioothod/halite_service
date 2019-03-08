@@ -15,4 +15,5 @@ message service_config {
 
 	optional int32 trajectory_len = 6 [default = 40];
 	optional int32 max_batch_size = 7 [default = 50];
+	optional int32 checkpoint_steps = 8 [default = 10000];
 }

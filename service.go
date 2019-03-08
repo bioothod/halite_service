@@ -38,6 +38,8 @@ type ServiceContext struct {
 
 	trlen int
 	max_batch_size int
+
+	checkpoint_steps int
 }
 
 type BatchWrapper struct {
@@ -213,7 +215,7 @@ func (ctx *ServiceContext) train() error {
 
 	ctx.train_step += 1
 
-	if ctx.train_step % 1000 == 0 {
+	if ctx.train_step % ctx.checkpoint_steps == 0 {
 		prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir, ctx.train_step)
 
 		_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
@@ -302,6 +304,7 @@ func main() {
 		train_dir: srv_config.GetTrainDir(),
 		trlen: int(srv_config.GetTrajectoryLen()),
 		max_batch_size: int(srv_config.GetMaxBatchSize()),
+		checkpoint_steps: int(srv_config.GetCheckpointSteps()),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)
