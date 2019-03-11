@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"rndgit.msk/goservice/log"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,9 @@ type ServiceContext struct {
 	max_batch_size int
 
 	checkpoint_steps int
+
+	graph_buffer bytes.Buffer
+	checkpoint_lock sync.Mutex
 }
 
 type BatchWrapper struct {
@@ -49,34 +53,50 @@ func (b *BatchWrapper) Data() []byte {
 	return b.batch
 }
 
+func (ctx *ServiceContext) gen_checkpoint_filenames(train_step int) (string, string, string) {
+	prefix := fmt.Sprintf("%s/%d.tmp_model.ckpt", ctx.train_dir, train_step)
+	index_file := fmt.Sprintf("%s.index", prefix)
+	data_file := fmt.Sprintf("%s.data-00000-of-00001", prefix)
+
+	return prefix, index_file, data_file
+}
+
+func (ctx *ServiceContext) cache_checkpoint(train_step int) (error) {
+	prefix, index_file, _ := ctx.gen_checkpoint_filenames(train_step)
+
+	ctx.checkpoint_lock.Lock()
+	defer ctx.checkpoint_lock.Unlock()
+
+	if _, err := os.Stat(index_file); os.IsNotExist(err) {
+		slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+		if err != nil {
+			return fmt.Errorf("could not get execution slot: %v", err)
+		}
+		defer slot.Cleanup()
+
+		_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
+		if err != nil {
+			return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+		}
+	}
+
+	return nil
+}
+
 func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto.Status) (*halite_proto.FrozenGraph, error) {
-	var b bytes.Buffer
-	bwriter := bufio.NewWriter(&b)
+	train_step := ctx.train_step
 
-	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+	prefix, index_file, data_file := ctx.gen_checkpoint_filenames(train_step)
+	err := ctx.cache_checkpoint(train_step)
 	if err != nil {
-		return nil, fmt.Errorf("could not get execution slot: %v", err)
-	}
-	defer slot.Cleanup()
-
-	_, err = slot.Graph().WriteTo(bwriter)
-	if err != nil {
-		return nil, fmt.Errorf("could not serialize graph_def: %v", err)
-	}
-	bwriter.Flush()
-
-	prefix := fmt.Sprintf("%s/%d.tmp_model.ckpt", ctx.train_dir, rand.Intn(100000))
-
-	checkpoint, err := StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
-	if err != nil {
-		return nil, fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+		return nil, err
 	}
 
-	index_file := fmt.Sprintf("%s.index", checkpoint)
-	data_file := fmt.Sprintf("%s.data-00000-of-00001", checkpoint)
-
-	defer os.Remove(index_file)
-	defer os.Remove(data_file)
+	for rm_step := train_step - 10; rm_step < train_step - 2; rm_step += 1 {
+		_, rm_index_file, rm_data_file := ctx.gen_checkpoint_filenames(rm_step)
+		os.Remove(rm_index_file)
+		os.Remove(rm_data_file)
+	}
 
 	checkpoint_index, err := ioutil.ReadFile(index_file)
 	if err != nil {
@@ -87,11 +107,11 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 		return nil, fmt.Errorf("could not read checkpoint data file '%s': %v", data_file, err)
 	}
 
-	log.Infof("sending model: train_step: %d, graph_def: %d, checkpoint: %s, index: %d, data: %d",
-		ctx.train_step, b.Len(), checkpoint, len(checkpoint_index), len(checkpoint_data))
+	log.Debugf("sending model: train_step: %d, graph_def: %d, checkpoint: %s, index: %d, data: %d",
+		ctx.train_step, ctx.graph_buffer.Len(), prefix, len(checkpoint_index), len(checkpoint_data))
 
 	return &halite_proto.FrozenGraph {
-		GraphDef: b.Bytes(),
+		GraphDef: ctx.graph_buffer.Bytes(),
 		Prefix: prefix,
 		SaverDef: ctx.saver_def,
 		CheckpointIndex: checkpoint_index,
@@ -112,6 +132,8 @@ func (ctx *ServiceContext) TrainStep(_ctx context.Context, _ *halite_proto.Statu
 }
 
 func (ctx *ServiceContext) train() error {
+	start_time := time.Now()
+
 	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size)
 	if len(batch) == 0 {
 		log.Infof("there is no data, sleeping...")
@@ -119,7 +141,8 @@ func (ctx *ServiceContext) train() error {
 		return nil
 	}
 
-	log.Infof("sampled %d episodes, episode len: %d", len(batch), len(batch[0].Entries))
+	batch_sampling_time_ms := time.Since(start_time).Seconds() * 1000
+	slot_start_time := time.Now()
 
 	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
 	if err != nil {
@@ -196,6 +219,9 @@ func (ctx *ServiceContext) train() error {
 		return fmt.Errorf("could not convert learning rate into tensor: %v", err)
 	}
 
+	train_preparation_time_ms := time.Since(slot_start_time).Seconds() * 1000
+	train_start_time := time.Now()
+
 	err = run.Run(input_tensors)
 	if err != nil {
 		return fmt.Errorf("could not run inference: %v", err)
@@ -210,8 +236,12 @@ func (ctx *ServiceContext) train() error {
 	_total_loss, err := run.Output("output/total_loss")
 	total_loss := _total_loss.(float32)
 
-	log.Infof("train step: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e",
-		ctx.train_step, policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss)
+	train_time_ms := time.Since(train_start_time).Seconds() * 1000
+
+	log.Infof("%d: trjs: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e, " +
+		"batch_sampling: %.1f ms, train_preparation: %.1f ms, train: %.1f ms",
+			ctx.train_step, len(batch), policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss,
+			batch_sampling_time_ms, train_preparation_time_ms, train_time_ms)
 
 	ctx.train_step += 1
 
@@ -266,6 +296,13 @@ func (ctx *ServiceContext) FillConfig() error {
 	}
 	ctx.logits_shape = res[0].Value().([]int64)
 	log.Infof("input: state shape: %v, params shape: %v, policy logits shape: %v", ctx.state_shape, ctx.params_shape, ctx.logits_shape)
+
+	bwriter := bufio.NewWriter(&ctx.graph_buffer)
+	_, err = slot.Graph().WriteTo(bwriter)
+	if err != nil {
+		return fmt.Errorf("could not serialize graph_def: %v", err)
+	}
+	bwriter.Flush()
 
 	return nil
 }
