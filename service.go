@@ -44,6 +44,8 @@ type ServiceContext struct {
 
 	graph_buffer bytes.Buffer
 	checkpoint_lock sync.Mutex
+
+	batch_channel chan map[string]*tf.Tensor
 }
 
 type BatchWrapper struct {
@@ -131,7 +133,7 @@ func (ctx *ServiceContext) TrainStep(_ctx context.Context, _ *halite_proto.Statu
 	return status, nil
 }
 
-func (ctx *ServiceContext) train() error {
+func (ctx *ServiceContext) generate_batch() error {
 	start_time := time.Now()
 
 	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size)
@@ -142,21 +144,7 @@ func (ctx *ServiceContext) train() error {
 	}
 
 	batch_sampling_time_ms := time.Since(start_time).Seconds() * 1000
-	slot_start_time := time.Now()
-
-	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
-	if err != nil {
-		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
-	}
-	defer slot.Cleanup()
-
-	run := slot.NewSessionRun()
-
-	run.AddOutput("output/policy_gradient_loss", DefaultConvert)
-	run.AddOutput("output/baseline_loss", DefaultConvert)
-	run.AddOutput("output/cross_entropy_loss", DefaultConvert)
-	run.AddOutput("output/total_loss", DefaultConvert)
-	run.AddTarget("output/train_op")
+	tensors_start_time := time.Now()
 
 	input_tensors := make(map[string]*tf.Tensor)
 
@@ -186,6 +174,7 @@ func (ctx *ServiceContext) train() error {
 		}
 	}
 
+	var err error
 	input_tensors["input/map"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_states.NumSources())}, ctx.state_shape...), input_states.NewReader())
 	if err != nil {
 		return fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
@@ -219,8 +208,35 @@ func (ctx *ServiceContext) train() error {
 		return fmt.Errorf("could not convert learning rate into tensor: %v", err)
 	}
 
-	train_preparation_time_ms := time.Since(slot_start_time).Seconds() * 1000
+	train_preparation_time_ms := time.Since(tensors_start_time).Seconds() * 1000
+
+	log.Debugf("%d: trjs: %d, batch_sampling: %.1f ms, train_preparation: %.1f ms",
+			ctx.train_step, len(batch), batch_sampling_time_ms, train_preparation_time_ms)
+
+	ctx.batch_channel <- input_tensors
+	return nil
+}
+
+func (ctx *ServiceContext) train() error {
+	start_time := time.Now()
+	input_tensors := <-ctx.batch_channel
+
+	tensors_waiting_time_ms := time.Since(start_time).Seconds() * 1000
+
 	train_start_time := time.Now()
+	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+	if err != nil {
+		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
+	}
+	defer slot.Cleanup()
+
+	run := slot.NewSessionRun()
+
+	run.AddOutput("output/policy_gradient_loss", DefaultConvert)
+	run.AddOutput("output/baseline_loss", DefaultConvert)
+	run.AddOutput("output/cross_entropy_loss", DefaultConvert)
+	run.AddOutput("output/total_loss", DefaultConvert)
+	run.AddTarget("output/train_op")
 
 	err = run.Run(input_tensors)
 	if err != nil {
@@ -239,9 +255,10 @@ func (ctx *ServiceContext) train() error {
 	train_time_ms := time.Since(train_start_time).Seconds() * 1000
 
 	log.Infof("%d: trjs: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e, " +
-		"batch_sampling: %.1f ms, train_preparation: %.1f ms, train: %.1f ms",
-			ctx.train_step, len(batch), policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss,
-			batch_sampling_time_ms, train_preparation_time_ms, train_time_ms)
+		"tensor waiting: %.1f ms, train: %.1f ms",
+			ctx.train_step, input_tensors["input/map"].Shape()[0] / int64(ctx.trlen),
+			policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss,
+			tensors_waiting_time_ms, train_time_ms)
 
 	ctx.train_step += 1
 
@@ -260,9 +277,18 @@ func (ctx *ServiceContext) train() error {
 func (ctx *ServiceContext) start_training() {
 	go func() {
 		for {
+			err := ctx.generate_batch()
+			if err != nil {
+				log.Fatalf("batch generation has failed: %v", err)
+			}
+		}
+	}()
+
+	go func() {
+		for {
 			err := ctx.train()
 			if err != nil {
-				log.Fatalf("training failed: %v", err)
+				log.Fatalf("training has failed: %v", err)
 			}
 		}
 	}()
@@ -342,6 +368,7 @@ func main() {
 		trlen: int(srv_config.GetTrajectoryLen()),
 		max_batch_size: int(srv_config.GetMaxBatchSize()),
 		checkpoint_steps: int(srv_config.GetCheckpointSteps()),
+		batch_channel: make(chan map[string]*tf.Tensor),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)
