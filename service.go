@@ -210,20 +210,22 @@ func (ctx *ServiceContext) generate_batch() error {
 
 	train_preparation_time_ms := time.Since(tensors_start_time).Seconds() * 1000
 
-	log.Debugf("%d: trjs: %d, batch_sampling: %.1f ms, train_preparation: %.1f ms",
-			ctx.train_step, len(batch), batch_sampling_time_ms, train_preparation_time_ms)
+	ctx.h.Lock()
+	num_episodes := ctx.h.NumEpisodes
+	num_entries := ctx.h.NumEntries
+	num_clients := len(ctx.h.Clients)
+	ctx.h.Unlock()
+	avg_traj_len := float32(num_entries) / float32(num_episodes)
+
+	log.Infof("%d: trjs: %d, batch_sampling: %.1f ms, train_preparation: %.1f ms, total episodes: %d, total entries: %d, total clients: %d, avg trajectory len: %.1f",
+			ctx.train_step, len(batch), batch_sampling_time_ms, train_preparation_time_ms,
+			num_episodes, num_entries, num_clients, avg_traj_len)
 
 	ctx.batch_channel <- input_tensors
 	return nil
 }
 
 func (ctx *ServiceContext) train() error {
-	start_time := time.Now()
-	input_tensors := <-ctx.batch_channel
-
-	tensors_waiting_time_ms := time.Since(start_time).Seconds() * 1000
-
-	train_start_time := time.Now()
 	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
 	if err != nil {
 		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
@@ -238,36 +240,43 @@ func (ctx *ServiceContext) train() error {
 	run.AddOutput("output/total_loss", DefaultConvert)
 	run.AddTarget("output/train_op")
 
-	err = run.Run(input_tensors)
-	if err != nil {
-		return fmt.Errorf("could not run inference: %v", err)
-	}
+	for {
+		start_time := time.Now()
+		input_tensors := <-ctx.batch_channel
+		tensors_waiting_time_ms := time.Since(start_time).Seconds() * 1000
 
-	_policy_gradient_loss, err := run.Output("output/policy_gradient_loss")
-	policy_gradient_loss := _policy_gradient_loss.(float32)
-	_baseline_loss, err := run.Output("output/baseline_loss")
-	baseline_loss := _baseline_loss.(float32)
-	_cross_entropy_loss, err := run.Output("output/cross_entropy_loss")
-	cross_entropy_loss := _cross_entropy_loss.(float32)
-	_total_loss, err := run.Output("output/total_loss")
-	total_loss := _total_loss.(float32)
-
-	train_time_ms := time.Since(train_start_time).Seconds() * 1000
-
-	log.Infof("%d: trjs: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e, " +
-		"tensor waiting: %.1f ms, train: %.1f ms",
-			ctx.train_step, input_tensors["input/map"].Shape()[0] / int64(ctx.trlen),
-			policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss,
-			tensors_waiting_time_ms, train_time_ms)
-
-	ctx.train_step += 1
-
-	if ctx.train_step % ctx.checkpoint_steps == 0 {
-		prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir, ctx.train_step)
-
-		_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
+		train_start_time := time.Now()
+		err = run.Run(input_tensors)
 		if err != nil {
-			return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+			return fmt.Errorf("could not run inference: %v", err)
+		}
+
+		_policy_gradient_loss, err := run.Output("output/policy_gradient_loss")
+		policy_gradient_loss := _policy_gradient_loss.(float32)
+		_baseline_loss, err := run.Output("output/baseline_loss")
+		baseline_loss := _baseline_loss.(float32)
+		_cross_entropy_loss, err := run.Output("output/cross_entropy_loss")
+		cross_entropy_loss := _cross_entropy_loss.(float32)
+		_total_loss, err := run.Output("output/total_loss")
+		total_loss := _total_loss.(float32)
+
+		train_time_ms := time.Since(train_start_time).Seconds() * 1000
+
+		log.Infof("%d: trjs: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e, " +
+			"tensor waiting: %.1f ms, train: %.1f ms",
+				ctx.train_step, input_tensors["input/map"].Shape()[0] / int64(ctx.trlen),
+				policy_gradient_loss, baseline_loss, cross_entropy_loss, total_loss,
+				tensors_waiting_time_ms, train_time_ms)
+
+		ctx.train_step += 1
+
+		if ctx.train_step % ctx.checkpoint_steps == 0 {
+			prefix := fmt.Sprintf("%s/model.ckpt-%d", ctx.train_dir, ctx.train_step)
+
+			_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
+			if err != nil {
+				return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+			}
 		}
 	}
 
@@ -361,14 +370,16 @@ func main() {
 
 	log.Infof("saver def size: %d", len(saver_def))
 
+	prune_timeout := time.Duration(srv_config.GetPruneOldClientsTimeoutSeconds()) * time.Second
+
 	ctx := &ServiceContext {
-		h: NewHistory(int(srv_config.GetMaxEpisodesPerClient()), int(srv_config.GetMaxEpisodesTotal())),
+		h: NewHistory(int(srv_config.GetMaxEpisodesPerClient()), int(srv_config.GetMaxEpisodesTotal()), prune_timeout),
 		saver_def : []byte(saver_def),
 		train_dir: srv_config.GetTrainDir(),
 		trlen: int(srv_config.GetTrajectoryLen()),
 		max_batch_size: int(srv_config.GetMaxBatchSize()),
 		checkpoint_steps: int(srv_config.GetCheckpointSteps()),
-		batch_channel: make(chan map[string]*tf.Tensor),
+		batch_channel: make(chan map[string]*tf.Tensor, int(srv_config.GetTrajectoryChannelSize())),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)

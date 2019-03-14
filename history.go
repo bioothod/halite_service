@@ -3,7 +3,9 @@ package main
 import (
 	"github.com/bioothod/halite/proto"
 	"math/rand"
+	"rndgit.msk/goservice/log"
 	"sync"
+	"time"
 )
 
 type State struct {
@@ -52,7 +54,7 @@ type Episode struct {
 func NewEpisode() *Episode {
 	return &Episode {
 		Completed: false,
-		Entries: make([]*Entry, 0, 100),
+		Entries: make([]*Entry, 0, 50),
 	}
 }
 
@@ -69,6 +71,10 @@ type HistoryStorage struct {
 
 	MaxEpisodes int
 	Episodes []*Episode
+
+	NumEntries int
+
+	UpdateTime time.Time
 }
 
 func NewHistoryStorage(owner_id, env_id int32, max_episodes int) *HistoryStorage {
@@ -76,6 +82,7 @@ func NewHistoryStorage(owner_id, env_id int32, max_episodes int) *HistoryStorage
 		OwnerId: owner_id,
 		EnvId: env_id,
 		MaxEpisodes: max_episodes,
+		NumEntries: 0,
 		Episodes: make([]*Episode, 0, max_episodes),
 	}
 }
@@ -83,6 +90,10 @@ func NewHistoryStorage(owner_id, env_id int32, max_episodes int) *HistoryStorage
 func (hs *HistoryStorage) AppendEntry(e *Entry) {
 	if len(hs.Episodes) > hs.MaxEpisodes {
 		start := len(hs.Episodes) / 10 + 1
+
+		for idx := 0; idx < start; idx += 1 {
+			hs.NumEntries -= len(hs.Episodes[idx].Entries)
+		}
 
 		hs.Episodes = hs.Episodes[start : len(hs.Episodes)]
 	}
@@ -95,12 +106,16 @@ func (hs *HistoryStorage) AppendEntry(e *Entry) {
 		hs.Episodes = append(hs.Episodes, ep)
 	}
 
-	if ep.Completed {
+	if ep.Completed && len(ep.Entries) > 100 {
 		ep = NewEpisode()
 		hs.Episodes = append(hs.Episodes, ep)
+	} else {
+		ep.Completed = false
 	}
 
 	ep.Append(e)
+	hs.NumEntries += 1
+	hs.UpdateTime = time.Now()
 }
 
 type History struct {
@@ -109,15 +124,25 @@ type History struct {
 	MaxEpisodesPerStorage int
 	MaxEpisodesTotal int
 
+	NumEntries int
+	NumEpisodes int
+
 	Clients map[int32]*HistoryStorage
+
+	PruneTimeout time.Duration
 }
 
-func NewHistory(max_episodes_per_storage, max_episodes_total int) *History {
+func NewHistory(max_episodes_per_storage, max_episodes_total int, prune_timeout time.Duration) *History {
 	return &History {
 		MaxEpisodesPerStorage: max_episodes_per_storage,
 		MaxEpisodesTotal: max_episodes_total,
 
+		NumEntries: 0,
+		NumEpisodes: 0,
+
 		Clients: make(map[int32]*HistoryStorage),
+
+		PruneTimeout: prune_timeout,
 	}
 }
 
@@ -135,7 +160,26 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 		h.Clients[idx] = hs
 	}
 
+	old_num_entris := hs.NumEntries
+	old_num_episodes := len(hs.Episodes)
 	hs.AppendEntry(e)
+	h.NumEntries = h.NumEntries - old_num_entris + hs.NumEntries
+	h.NumEpisodes = h.NumEpisodes - old_num_episodes + len(hs.Episodes)
+
+	remove_clients := make([]int32, 0)
+	for id, hs := range h.Clients {
+		if time.Now().After(hs.UpdateTime.Add(h.PruneTimeout)) {
+			log.Infof("removing client %d.%d (%d) because of lack of activity since %v, it has entries: %d, episodes: %d",
+				hs.OwnerId, hs.EnvId, id, hs.UpdateTime, hs.NumEntries, len(hs.Episodes))
+			remove_clients = append(remove_clients, id)
+			h.NumEpisodes -= len(hs.Episodes)
+			h.NumEntries -= hs.NumEntries
+		}
+	}
+
+	for _, id := range remove_clients {
+		delete(h.Clients, id)
+	}
 }
 
 // fixed trajectory len
@@ -143,12 +187,7 @@ func (h *History) Sample(trlen int, max_batch_size int) ([]*Episode) {
 	h.Lock()
 	defer h.Unlock()
 
-	num_episodes := 0
-	for _, st := range h.Clients {
-		num_episodes += len(st.Episodes)
-	}
-
-	episodes := make([]*Episode, 0, num_episodes)
+	episodes := make([]*Episode, 0, h.NumEpisodes)
 	for _, st := range h.Clients {
 		for _, ep := range st.Episodes {
 			if len(ep.Entries) > trlen {
@@ -171,13 +210,17 @@ func (h *History) Sample(trlen int, max_batch_size int) ([]*Episode) {
 
 	ret := make([]*Episode, 0, max_batch_size)
 	for _, ep := range episodes[0 : max_batch_size] {
-		start := rand.Intn(len(ep.Entries))
 		end := len(ep.Entries)
+		start := rand.Intn(len(ep.Entries))
 
-		if end - start < trlen {
+		if false {
 			start = end - trlen
 		} else {
-			end = start + trlen
+			if end - start < trlen {
+				start = end - trlen
+			} else {
+				end = start + trlen
+			}
 		}
 
 		copy_ep := &Episode {

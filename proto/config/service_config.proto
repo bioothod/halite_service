@@ -16,4 +16,6 @@ message service_config {
 	optional int32 trajectory_len = 6 [default = 40];
 	optional int32 max_batch_size = 7 [default = 50];
 	optional int32 checkpoint_steps = 8 [default = 10000];
+	optional int32 trajectory_channel_size = 9 [default = 1];
+	optional int32 prune_old_clients_timeout_seconds = 10 [default = 120];
 }
