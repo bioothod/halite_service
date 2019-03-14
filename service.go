@@ -46,6 +46,8 @@ type ServiceContext struct {
 	checkpoint_lock sync.Mutex
 
 	batch_channel chan map[string]*tf.Tensor
+
+	learning_rate float32
 }
 
 type BatchWrapper struct {
@@ -203,7 +205,7 @@ func (ctx *ServiceContext) generate_batch() error {
 	if err != nil {
 		return fmt.Errorf("could not convert input time steps into tensor: %v", err)
 	}
-	input_tensors["learning_rate_ph"], err = tf.NewTensor(float32(0.001))
+	input_tensors["learning_rate_ph"], err = tf.NewTensor(ctx.learning_rate)
 	if err != nil {
 		return fmt.Errorf("could not convert learning rate into tensor: %v", err)
 	}
@@ -380,6 +382,7 @@ func main() {
 		max_batch_size: int(srv_config.GetMaxBatchSize()),
 		checkpoint_steps: int(srv_config.GetCheckpointSteps()),
 		batch_channel: make(chan map[string]*tf.Tensor, int(srv_config.GetTrajectoryChannelSize())),
+		learning_rate: srv_config.GetLearningRate(),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)

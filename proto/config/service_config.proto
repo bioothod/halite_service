@@ -18,4 +18,5 @@ message service_config {
 	optional int32 checkpoint_steps = 8 [default = 10000];
 	optional int32 trajectory_channel_size = 9 [default = 1];
 	optional int32 prune_old_clients_timeout_seconds = 10 [default = 120];
+	optional float learning_rate = 11 [default = 0.001];
 }
