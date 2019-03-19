@@ -21,8 +21,6 @@ import (
 	"time"
 )
 
-const SERVICE_NAME = "halite_service"
-
 type ServiceContext struct {
 	sm  *SessionManager
 
@@ -48,6 +46,8 @@ type ServiceContext struct {
 	batch_channel chan map[string]*tf.Tensor
 
 	learning_rate float32
+
+	service_name string
 }
 
 type BatchWrapper struct {
@@ -72,7 +72,7 @@ func (ctx *ServiceContext) cache_checkpoint(train_step int) (error) {
 	defer ctx.checkpoint_lock.Unlock()
 
 	if _, err := os.Stat(index_file); os.IsNotExist(err) {
-		slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+		slot, err := ctx.sm.GetExecutionSlot(ctx.service_name, 1)
 		if err != nil {
 			return fmt.Errorf("could not get execution slot: %v", err)
 		}
@@ -228,9 +228,9 @@ func (ctx *ServiceContext) generate_batch() error {
 }
 
 func (ctx *ServiceContext) train() error {
-	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+	slot, err := ctx.sm.GetExecutionSlot(ctx.service_name, 1)
 	if err != nil {
-		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
+		return fmt.Errorf("%s: could not get execution slot: %v", ctx.service_name, err)
 	}
 	defer slot.Cleanup()
 
@@ -306,9 +306,9 @@ func (ctx *ServiceContext) start_training() {
 }
 
 func (ctx *ServiceContext) FillConfig() error {
-	slot, err := ctx.sm.GetExecutionSlot(SERVICE_NAME, 1)
+	slot, err := ctx.sm.GetExecutionSlot(ctx.service_name, 1)
 	if err != nil {
-		return fmt.Errorf("%s: could not get execution slot: %v", SERVICE_NAME, err)
+		return fmt.Errorf("%s: could not get execution slot: %v", ctx.service_name, err)
 	}
 	defer slot.Cleanup()
 
@@ -348,6 +348,7 @@ func main() {
 	cfg_path := flag.String("c", "halite_service.conf", "Halite service config file")
 	cpu_only := flag.Bool("cpu_only", false, "if specified, only CPU devices will be used if specified in service configs")
 	gpu_only := flag.Bool("gpu_only", false, "if specified, only GPU devices will be used if specified in service configs")
+	service_name := flag.String("service_name", "", "if specified, use this default name for the service")
 	flag.Parse()
 
 	config := &halite_config.HaliteConfig{}
@@ -383,6 +384,7 @@ func main() {
 		checkpoint_steps: int(srv_config.GetCheckpointSteps()),
 		batch_channel: make(chan map[string]*tf.Tensor, int(srv_config.GetTrajectoryChannelSize())),
 		learning_rate: srv_config.GetLearningRate(),
+		service_name: *service_name,
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)
@@ -396,7 +398,11 @@ func main() {
 		log.Fatalf("could not read config tensors: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	var opts []grpc.ServerOption
+	opts = append(opts, grpc.MaxRecvMsgSize(100*1024*1024))
+	opts = append(opts, grpc.MaxSendMsgSize(100*1024*1024))
+
+	grpcServer := grpc.NewServer(opts...)
 	halite_proto.RegisterHaliteProcessServer(grpcServer, ctx)
 
 	ctx.start_training()
