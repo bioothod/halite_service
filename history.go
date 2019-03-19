@@ -106,7 +106,7 @@ func (hs *HistoryStorage) AppendEntry(e *Entry) {
 		hs.Episodes = append(hs.Episodes, ep)
 	}
 
-	if ep.Completed && len(ep.Entries) > 100 {
+	if ep.Completed && len(ep.Entries) > 200 {
 		ep = NewEpisode()
 		hs.Episodes = append(hs.Episodes, ep)
 	} else {
