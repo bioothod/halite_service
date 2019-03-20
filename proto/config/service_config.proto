@@ -19,4 +19,6 @@ message service_config {
 	optional int32 trajectory_channel_size = 9 [default = 1];
 	optional int32 prune_old_clients_timeout_seconds = 10 [default = 120];
 	optional float learning_rate = 11 [default = 0.001];
+	optional bool generate_trajectory_from_the_end = 12 [default = false];
+	optional int32 adjacent_trajectory_limit_min = 13 [default = 100];
 }

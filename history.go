@@ -75,15 +75,18 @@ type HistoryStorage struct {
 	NumEntries int
 
 	UpdateTime time.Time
+
+	AdjacentTrajectoryLimitMin int
 }
 
-func NewHistoryStorage(owner_id, env_id int32, max_episodes int) *HistoryStorage {
+func (h *History) NewHistoryStorage(owner_id, env_id int32) *HistoryStorage {
 	return &HistoryStorage {
 		OwnerId: owner_id,
 		EnvId: env_id,
-		MaxEpisodes: max_episodes,
+		AdjacentTrajectoryLimitMin: h.AdjacentTrajectoryLimitMin,
+		MaxEpisodes: h.MaxEpisodesPerStorage,
 		NumEntries: 0,
-		Episodes: make([]*Episode, 0, max_episodes),
+		Episodes: make([]*Episode, 0, h.MaxEpisodesPerStorage),
 	}
 }
 
@@ -106,7 +109,7 @@ func (hs *HistoryStorage) AppendEntry(e *Entry) {
 		hs.Episodes = append(hs.Episodes, ep)
 	}
 
-	if ep.Completed && len(ep.Entries) > 200 {
+	if ep.Completed && len(ep.Entries) > hs.AdjacentTrajectoryLimitMin {
 		ep = NewEpisode()
 		hs.Episodes = append(hs.Episodes, ep)
 	} else {
@@ -130,9 +133,11 @@ type History struct {
 	Clients map[int32]*HistoryStorage
 
 	PruneTimeout time.Duration
+
+	AdjacentTrajectoryLimitMin int
 }
 
-func NewHistory(max_episodes_per_storage, max_episodes_total int, prune_timeout time.Duration) *History {
+func NewHistory(max_episodes_per_storage, max_episodes_total int, prune_timeout time.Duration, adj_traj_limit_min int) *History {
 	return &History {
 		MaxEpisodesPerStorage: max_episodes_per_storage,
 		MaxEpisodesTotal: max_episodes_total,
@@ -143,6 +148,8 @@ func NewHistory(max_episodes_per_storage, max_episodes_total int, prune_timeout 
 		Clients: make(map[int32]*HistoryStorage),
 
 		PruneTimeout: prune_timeout,
+
+		AdjacentTrajectoryLimitMin: adj_traj_limit_min,
 	}
 }
 
@@ -156,7 +163,7 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 
 	hs, ok := h.Clients[idx]
 	if !ok {
-		hs = NewHistoryStorage(n.OwnerId, n.EnvId, h.MaxEpisodesPerStorage)
+		hs = h.NewHistoryStorage(n.OwnerId, n.EnvId)
 		h.Clients[idx] = hs
 	}
 
@@ -183,7 +190,7 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 }
 
 // fixed trajectory len
-func (h *History) Sample(trlen int, max_batch_size int) ([]*Episode) {
+func (h *History) Sample(trlen int, max_batch_size int, sample_from_the_end bool) ([]*Episode) {
 	h.Lock()
 	defer h.Unlock()
 
@@ -213,7 +220,7 @@ func (h *History) Sample(trlen int, max_batch_size int) ([]*Episode) {
 		end := len(ep.Entries)
 		start := rand.Intn(len(ep.Entries))
 
-		if false {
+		if sample_from_the_end {
 			start = end - trlen
 		} else {
 			if end - start < trlen {

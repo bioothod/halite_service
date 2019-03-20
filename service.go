@@ -48,6 +48,8 @@ type ServiceContext struct {
 	learning_rate float32
 
 	service_name string
+
+	sample_from_the_end bool
 }
 
 type BatchWrapper struct {
@@ -138,7 +140,7 @@ func (ctx *ServiceContext) TrainStep(_ctx context.Context, _ *halite_proto.Statu
 func (ctx *ServiceContext) generate_batch() error {
 	start_time := time.Now()
 
-	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size)
+	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size, ctx.sample_from_the_end)
 	if len(batch) == 0 {
 		log.Infof("there is no data, sleeping...")
 		time.Sleep(1 * time.Second)
@@ -376,7 +378,7 @@ func main() {
 	prune_timeout := time.Duration(srv_config.GetPruneOldClientsTimeoutSeconds()) * time.Second
 
 	ctx := &ServiceContext {
-		h: NewHistory(int(srv_config.GetMaxEpisodesPerClient()), int(srv_config.GetMaxEpisodesTotal()), prune_timeout),
+		h: NewHistory(int(srv_config.GetMaxEpisodesPerClient()), int(srv_config.GetMaxEpisodesTotal()), prune_timeout, int(srv_config.GetAdjacentTrajectoryLimitMin())),
 		saver_def : []byte(saver_def),
 		train_dir: srv_config.GetTrainDir(),
 		trlen: int(srv_config.GetTrajectoryLen()),
@@ -385,6 +387,7 @@ func main() {
 		batch_channel: make(chan map[string]*tf.Tensor, int(srv_config.GetTrajectoryChannelSize())),
 		learning_rate: srv_config.GetLearningRate(),
 		service_name: *service_name,
+		sample_from_the_end: srv_config.GetGenerateTrajectoryFromTheEnd(),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)
