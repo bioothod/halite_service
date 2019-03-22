@@ -48,8 +48,6 @@ type ServiceContext struct {
 	learning_rate float32
 
 	service_name string
-
-	sample_from_the_end bool
 }
 
 type BatchWrapper struct {
@@ -140,7 +138,7 @@ func (ctx *ServiceContext) TrainStep(_ctx context.Context, _ *halite_proto.Statu
 func (ctx *ServiceContext) generate_batch() error {
 	start_time := time.Now()
 
-	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size, ctx.sample_from_the_end)
+	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size)
 	if len(batch) == 0 {
 		log.Infof("there is no data, sleeping...")
 		time.Sleep(1 * time.Second)
@@ -159,8 +157,8 @@ func (ctx *ServiceContext) generate_batch() error {
 	input_rewards := make([]float32, 0, ctx.trlen * len(batch))
 	input_dones := make([]bool, 0, ctx.trlen * len(batch))
 
-	for _, tr := range batch {
-		for _, e := range tr.Entries {
+	for _, trj := range batch {
+		for _, e := range trj {
 			sw := &BatchWrapper {
 				batch: e.OldState.State,
 			}
@@ -215,15 +213,13 @@ func (ctx *ServiceContext) generate_batch() error {
 	train_preparation_time_ms := time.Since(tensors_start_time).Seconds() * 1000
 
 	ctx.h.Lock()
-	num_episodes := ctx.h.NumEpisodes
 	num_entries := ctx.h.NumEntries
 	num_clients := len(ctx.h.Clients)
 	ctx.h.Unlock()
-	avg_traj_len := float32(num_entries) / float32(num_episodes)
 
-	log.Infof("%d: trjs: %d, batch_sampling: %.1f ms, train_preparation: %.1f ms, total episodes: %d, total entries: %d, total clients: %d, avg trajectory len: %.1f",
+	log.Infof("%d: trjs: %d, batch_sampling: %.1f ms, train_preparation: %.1f ms, total entries: %d, total clients: %d",
 			ctx.train_step, len(batch), batch_sampling_time_ms, train_preparation_time_ms,
-			num_episodes, num_entries, num_clients, avg_traj_len)
+			num_entries, num_clients)
 
 	ctx.batch_channel <- input_tensors
 	return nil
@@ -378,7 +374,7 @@ func main() {
 	prune_timeout := time.Duration(srv_config.GetPruneOldClientsTimeoutSeconds()) * time.Second
 
 	ctx := &ServiceContext {
-		h: NewHistory(int(srv_config.GetMaxEpisodesPerClient()), int(srv_config.GetMaxEpisodesTotal()), prune_timeout, int(srv_config.GetAdjacentTrajectoryLimitMin())),
+		h: NewHistory(int(srv_config.GetMaxEntriesPerClient()), prune_timeout),
 		saver_def : []byte(saver_def),
 		train_dir: srv_config.GetTrainDir(),
 		trlen: int(srv_config.GetTrajectoryLen()),
@@ -387,7 +383,6 @@ func main() {
 		batch_channel: make(chan map[string]*tf.Tensor, int(srv_config.GetTrajectoryChannelSize())),
 		learning_rate: srv_config.GetLearningRate(),
 		service_name: *service_name,
-		sample_from_the_end: srv_config.GetGenerateTrajectoryFromTheEnd(),
 	}
 
 	ctx.sm, err = NewSessionManagerFromConfigWithWildcards(config.GetSessionManagerConfig(), *cpu_only, *gpu_only)

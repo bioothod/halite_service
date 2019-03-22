@@ -8,17 +8,14 @@ message service_config {
 
 	required string train_dir = 2;
 
-	optional int32 max_episodes_per_client = 3 [default = 30];
-	optional int32 max_episodes_total = 4 [default = 1000];
+	optional int32 max_entries_per_client = 3 [default = 30];
 
-	required string saver_def = 5;
+	required string saver_def = 4;
 
-	optional int32 trajectory_len = 6 [default = 40];
-	optional int32 max_batch_size = 7 [default = 50];
-	optional int32 checkpoint_steps = 8 [default = 10000];
-	optional int32 trajectory_channel_size = 9 [default = 1];
-	optional int32 prune_old_clients_timeout_seconds = 10 [default = 120];
-	optional float learning_rate = 11 [default = 0.001];
-	optional bool generate_trajectory_from_the_end = 12 [default = false];
-	optional int32 adjacent_trajectory_limit_min = 13 [default = 100];
+	optional int32 trajectory_len = 5 [default = 40];
+	optional int32 max_batch_size = 6 [default = 50];
+	optional int32 checkpoint_steps = 7 [default = 10000];
+	optional int32 trajectory_channel_size = 8 [default = 1];
+	optional int32 prune_old_clients_timeout_seconds = 9 [default = 120];
+	optional float learning_rate = 10 [default = 0.001];
 }
