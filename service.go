@@ -65,36 +65,34 @@ func (ctx *ServiceContext) gen_checkpoint_filenames(train_step int) (string, str
 	return prefix, index_file, data_file
 }
 
-func (ctx *ServiceContext) cache_checkpoint(train_step int) (error) {
-	prefix, index_file, _ := ctx.gen_checkpoint_filenames(train_step)
-
+func (ctx *ServiceContext) cache_checkpoint() (int, error) {
 	ctx.checkpoint_lock.Lock()
 	defer ctx.checkpoint_lock.Unlock()
+
+	prefix, index_file, _ := ctx.gen_checkpoint_filenames(ctx.train_step)
 
 	if _, err := os.Stat(index_file); os.IsNotExist(err) {
 		slot, err := ctx.sm.GetExecutionSlot(ctx.service_name, 1)
 		if err != nil {
-			return fmt.Errorf("could not get execution slot: %v", err)
+			return -1, fmt.Errorf("could not get execution slot: %v", err)
 		}
 		defer slot.Cleanup()
 
 		_, err = StoreVariablesIntoCheckpoint(slot.Graph(), slot.Session(), prefix)
 		if err != nil {
-			return fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
+			return -1, fmt.Errorf("could not save checkpoint '%s': %v", prefix, err)
 		}
 	}
 
-	return nil
+	return ctx.train_step, nil
 }
 
 func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto.Status) (*halite_proto.FrozenGraph, error) {
-	train_step := ctx.train_step
-
-	prefix, index_file, data_file := ctx.gen_checkpoint_filenames(train_step)
-	err := ctx.cache_checkpoint(train_step)
+	train_step, err := ctx.cache_checkpoint()
 	if err != nil {
 		return nil, err
 	}
+	prefix, index_file, data_file := ctx.gen_checkpoint_filenames(train_step)
 
 	for rm_step := train_step - 10; rm_step < train_step - 2; rm_step += 1 {
 		_, rm_index_file, rm_data_file := ctx.gen_checkpoint_filenames(rm_step)
@@ -111,8 +109,8 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 		return nil, fmt.Errorf("could not read checkpoint data file '%s': %v", data_file, err)
 	}
 
-	log.Debugf("sending model: train_step: %d, graph_def: %d, checkpoint: %s, index: %d, data: %d",
-		ctx.train_step, ctx.graph_buffer.Len(), prefix, len(checkpoint_index), len(checkpoint_data))
+	log.Infof("sending model: train_step: %d, graph_def: %d, checkpoint: %s, index: %d, data: %d",
+		train_step, ctx.graph_buffer.Len(), prefix, len(checkpoint_index), len(checkpoint_data))
 
 	return &halite_proto.FrozenGraph {
 		GraphDef: ctx.graph_buffer.Bytes(),
@@ -120,6 +118,7 @@ func (ctx *ServiceContext) GetFrozenGraph(_ctx context.Context, he *halite_proto
 		SaverDef: ctx.saver_def,
 		CheckpointIndex: checkpoint_index,
 		CheckpointData: checkpoint_data,
+		TrainStep: int32(train_step),
 	}, nil
 }
 
@@ -135,14 +134,14 @@ func (ctx *ServiceContext) TrainStep(_ctx context.Context, _ *halite_proto.Statu
 	return status, nil
 }
 
-func (ctx *ServiceContext) generate_batch() error {
+func (ctx *ServiceContext) generate_batch() (map[string]*tf.Tensor, error){
 	start_time := time.Now()
 
-	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size)
-	if len(batch) == 0 {
-		log.Infof("there is no data, sleeping...")
+	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size, int32(ctx.train_step))
+	if batch == nil || len(batch) < 20 {
+		log.Infof("train_step: %d: there is no data, sleeping...", ctx.train_step)
 		time.Sleep(1 * time.Second)
-		return nil
+		return nil, nil
 	}
 
 	batch_sampling_time_ms := time.Since(start_time).Seconds() * 1000
@@ -179,35 +178,35 @@ func (ctx *ServiceContext) generate_batch() error {
 	var err error
 	input_tensors["input/map"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_states.NumSources())}, ctx.state_shape...), input_states.NewReader())
 	if err != nil {
-		return fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
+		return nil, fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
 	}
 	input_tensors["input/params"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_params.NumSources())}, ctx.params_shape...), input_params.NewReader())
 	if err != nil {
-		return fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.params_shape, err)
+		return nil, fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.params_shape, err)
 	}
 	input_tensors["input/policy_logits"], err = tf.NewTensor(input_logits)
 	if err != nil {
-		return fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.logits_shape, err)
+		return nil, fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.logits_shape, err)
 	}
 	input_tensors["input/action_taken"], err = tf.NewTensor(input_actions)
 	if err != nil {
-		return fmt.Errorf("could not convert input actions into tensor: %v", err)
+		return nil, fmt.Errorf("could not convert input actions into tensor: %v", err)
 	}
 	input_tensors["input/done"], err = tf.NewTensor(input_dones)
 	if err != nil {
-		return fmt.Errorf("could not convert input dones into tensor: %v", err)
+		return nil, fmt.Errorf("could not convert input dones into tensor: %v", err)
 	}
 	input_tensors["input/reward"], err = tf.NewTensor(input_rewards)
 	if err != nil {
-		return fmt.Errorf("could not convert input rewards into tensor: %v", err)
+		return nil, fmt.Errorf("could not convert input rewards into tensor: %v", err)
 	}
 	input_tensors["input/time_steps"], err = tf.NewTensor(int32(ctx.trlen))
 	if err != nil {
-		return fmt.Errorf("could not convert input time steps into tensor: %v", err)
+		return nil, fmt.Errorf("could not convert input time steps into tensor: %v", err)
 	}
 	input_tensors["learning_rate_ph"], err = tf.NewTensor(ctx.learning_rate)
 	if err != nil {
-		return fmt.Errorf("could not convert learning rate into tensor: %v", err)
+		return nil, fmt.Errorf("could not convert learning rate into tensor: %v", err)
 	}
 
 	train_preparation_time_ms := time.Since(tensors_start_time).Seconds() * 1000
@@ -221,8 +220,7 @@ func (ctx *ServiceContext) generate_batch() error {
 			ctx.train_step, len(batch), batch_sampling_time_ms, train_preparation_time_ms,
 			num_entries, num_clients)
 
-	ctx.batch_channel <- input_tensors
-	return nil
+	return input_tensors, nil
 }
 
 func (ctx *ServiceContext) train() error {
@@ -242,7 +240,19 @@ func (ctx *ServiceContext) train() error {
 
 	for {
 		start_time := time.Now()
-		input_tensors := <-ctx.batch_channel
+		var input_tensors map[string]*tf.Tensor
+
+		for {
+			input_tensors, err = ctx.generate_batch()
+			if err != nil {
+				return err
+			}
+
+			if input_tensors != nil {
+				break
+			}
+		}
+
 		tensors_waiting_time_ms := time.Since(start_time).Seconds() * 1000
 
 		train_start_time := time.Now()
@@ -284,15 +294,6 @@ func (ctx *ServiceContext) train() error {
 }
 
 func (ctx *ServiceContext) start_training() {
-	go func() {
-		for {
-			err := ctx.generate_batch()
-			if err != nil {
-				log.Fatalf("batch generation has failed: %v", err)
-			}
-		}
-	}()
-
 	go func() {
 		for {
 			err := ctx.train()

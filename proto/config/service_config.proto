@@ -8,7 +8,7 @@ message service_config {
 
 	required string train_dir = 2;
 
-	optional int32 max_entries_per_client = 3 [default = 30];
+	optional int32 max_entries_per_client = 3 [default = 500];
 
 	required string saver_def = 4;
 

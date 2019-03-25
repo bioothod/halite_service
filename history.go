@@ -21,6 +21,7 @@ type Entry struct {
 	Action		int32
 	Step		int32
 	Logits		[]float32
+	TrainStep	int32
 }
 
 func NewEntry(n *halite_proto.HistoryEntry) *Entry {
@@ -40,6 +41,7 @@ func NewEntry(n *halite_proto.HistoryEntry) *Entry {
 		Logits: n.Logits,
 
 		Step: n.Step,
+		TrainStep: n.TrainStep,
 	}
 
 	return e
@@ -49,8 +51,9 @@ type HistoryStorage struct {
 	OwnerId int32
 	EnvId int32
 
-	Entries *list.List
+	Entries []*list.List
 
+	NumEntries int
 	MaxEntries int
 
 	UpdateTime time.Time
@@ -60,18 +63,84 @@ func (h *History) NewHistoryStorage(owner_id, env_id int32) *HistoryStorage {
 	return &HistoryStorage {
 		OwnerId: owner_id,
 		EnvId: env_id,
-		Entries: list.New(),
+		Entries: make([]*list.List, 0),
 		MaxEntries: h.MaxEntriesPerStorage,
 	}
 }
 
-func (hs *HistoryStorage) AppendEntry(e *Entry) {
-	if hs.Entries.Len() >= hs.MaxEntries {
-		first := hs.Entries.Front()
-		hs.Entries.Remove(first)
+func (hs *HistoryStorage) Cleanup(num int) {
+	if num <= 0 {
+		return
 	}
 
-	hs.Entries.PushBack(e)
+	new_start_index := 0
+	for _, trj := range hs.Entries {
+		first := trj.Front()
+		if first != nil {
+			for {
+				next := first.Next()
+				trj.Remove(first)
+				num -= 1
+				hs.NumEntries -= 1
+
+				if next == nil || num < 0 {
+					break
+				}
+
+				first = next
+			}
+		}
+
+		if trj.Len() == 0 {
+			new_start_index += 1
+		}
+
+		if num < 0 {
+			break
+		}
+	}
+
+	if new_start_index != 0 {
+		hs.Entries = hs.Entries[new_start_index : len(hs.Entries)]
+	}
+}
+
+func get_train_step(l *list.List) int32 {
+	var train_step int32 = -1
+
+	last := l.Back()
+	if last != nil {
+		last_ent := last.Value.(*Entry)
+		train_step = last_ent.TrainStep
+	}
+
+	return train_step
+}
+
+func (hs *HistoryStorage) Append(e *Entry) {
+	var l *list.List
+
+	if len(hs.Entries) == 0 {
+		l = list.New()
+		hs.Entries = append(hs.Entries, l)
+	} else {
+		l = hs.Entries[len(hs.Entries) - 1]
+		train_step := get_train_step(l)
+
+		if e.TrainStep != train_step {
+			l = list.New()
+			hs.Entries = append(hs.Entries, l)
+		}
+	}
+
+	l.PushBack(e)
+	hs.NumEntries += 1
+}
+
+func (hs *HistoryStorage) AppendEntry(e *Entry) {
+	hs.Append(e)
+	hs.Cleanup(hs.NumEntries - hs.MaxEntries)
+
 	hs.UpdateTime = time.Now()
 }
 
@@ -113,17 +182,17 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 		h.Clients[idx] = hs
 	}
 
-	old_num_entris := hs.Entries.Len()
+	old_num_entris := hs.NumEntries
 	hs.AppendEntry(e)
-	h.NumEntries = h.NumEntries - old_num_entris + hs.Entries.Len()
+	h.NumEntries = h.NumEntries - old_num_entris + hs.NumEntries
 
 	remove_clients := make([]int32, 0)
 	for id, hs := range h.Clients {
 		if time.Now().After(hs.UpdateTime.Add(h.PruneTimeout)) {
 			log.Infof("removing client %d.%d (%d) because of lack of activity since %v, it has entries: %d",
-				hs.OwnerId, hs.EnvId, id, hs.UpdateTime, hs.Entries.Len())
+				hs.OwnerId, hs.EnvId, id, hs.UpdateTime, hs.NumEntries)
 			remove_clients = append(remove_clients, id)
-			h.NumEntries -= hs.Entries.Len()
+			h.NumEntries -= hs.NumEntries
 		}
 	}
 
@@ -133,40 +202,49 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 }
 
 // fixed trajectory len
-func (h *History) Sample(trlen int, max_batch_size int) ([][]*Entry) {
+func (h *History) Sample(trlen int, max_batch_size int, train_step int32) ([][]*Entry) {
 	h.Lock()
 	defer h.Unlock()
 
-	total_len := 0
 	episodes := make([]*list.List, 0, len(h.Clients))
 	for _, hs := range h.Clients {
-		if hs.Entries.Len() < trlen {
-			continue
-		}
+		for _, trj_list := range hs.Entries {
+			trj_train_step := get_train_step(trj_list)
 
-		episodes = append(episodes, hs.Entries)
-		total_len += hs.Entries.Len()
+			if trj_train_step < train_step || trj_list.Len() < trlen {
+				continue
+			}
+
+			episodes = append(episodes, trj_list)
+		}
 	}
 
-	if total_len == 0 {
+	if len(episodes) == 0 {
 		return nil
 	}
 
 	ret := make([][]*Entry, 0, max_batch_size)
 	for _, l := range episodes {
-		trj := make([]*Entry, trlen, trlen)
-
 		e := l.Back()
-		for idx := trlen - 1; idx >= 0; idx -= 1 {
-			trj[idx] = e.Value.(*Entry)
+		for i := 0; i < l.Len() / trlen; i += 1 {
+			trj := make([]*Entry, trlen, trlen)
 
-			e = e.Prev()
-		}
+			for idx := trlen - 1; idx >= 0; idx -= 1 {
+				trj[idx] = e.Value.(*Entry)
 
-		ret = append(ret, trj)
+				e = e.Prev()
+				if e == nil {
+					break
+				}
+			}
 
-		if len(ret) > max_batch_size {
-			break
+			if trj[0] != nil {
+				ret = append(ret, trj)
+			}
+
+			if len(ret) > max_batch_size {
+				break
+			}
 		}
 	}
 

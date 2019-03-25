@@ -36,6 +36,7 @@ message HistoryEntry {
     bool done = 7;
     int32 step = 8;
     repeated float logits = 9;
+    int32 train_step = 10;
 }
 
 message FrozenGraph {
@@ -45,6 +46,7 @@ message FrozenGraph {
     bytes checkpoint_data = 4;
     bytes saver_def = 5;
     bytes frozen_graph = 6;
+    int32 train_step = 7;
 }
 
 service HaliteProcess {
