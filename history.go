@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/list"
+	"fmt"
 	"github.com/bioothod/halite/proto"
 	"rndgit.msk/goservice/log"
 	"sync"
@@ -226,16 +227,22 @@ func (h *History) Sample(trlen int, max_batch_size int, train_step int32) ([][]*
 	active_clients := make([]int32, 0, len(h.Clients))
 
 	for _, hs := range h.Clients {
+		ent_debug := make([]string, 0, len(hs.Entries))
+
 		for _, trj_list := range hs.Entries {
 			trj_train_step := get_train_step(trj_list)
 
-			if trj_train_step < train_step || trj_list.Len() < trlen {
+			ent_debug = append(ent_debug, fmt.Sprintf("[step: %d, len: %d]", trj_train_step, trj_list.Len()))
+			if trj_train_step != train_step || trj_list.Len() < trlen {
 				continue
 			}
 
 			episodes = append(episodes, trj_list)
 			active_clients = append(active_clients, generate_client_index(hs.OwnerId, hs.EnvId))
 		}
+
+		log.Infof("train_step: %d, trj_len: %d, client: %d.%d, entries: %d, episodes: %d, batch_size: %d: %v",
+			train_step, trlen, hs.OwnerId, hs.EnvId, len(hs.Entries), len(episodes), max_batch_size, ent_debug)
 	}
 
 	if len(episodes) < max_batch_size {
