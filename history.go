@@ -57,6 +57,9 @@ type HistoryStorage struct {
 	MaxEntries int
 
 	UpdateTime time.Time
+
+	c_state []float32
+	h_state []float32
 }
 
 func (h *History) NewHistoryStorage(owner_id, env_id int32) *HistoryStorage {
@@ -65,6 +68,9 @@ func (h *History) NewHistoryStorage(owner_id, env_id int32) *HistoryStorage {
 		EnvId: env_id,
 		Entries: make([]*list.List, 0),
 		MaxEntries: h.MaxEntriesPerStorage,
+
+		c_state: make([]float32, h.CStateSize),
+		h_state: make([]float32, h.HStateSize),
 	}
 }
 
@@ -154,9 +160,12 @@ type History struct {
 	Clients map[int32]*HistoryStorage
 
 	PruneTimeout time.Duration
+
+	CStateSize int
+	HStateSize int
 }
 
-func NewHistory(max_entries_per_storage int, prune_timeout time.Duration) *History {
+func NewHistory(max_entries_per_storage int, prune_timeout time.Duration, c_state_size, h_state_size int) *History {
 	return &History {
 		MaxEntriesPerStorage: max_entries_per_storage,
 
@@ -165,7 +174,14 @@ func NewHistory(max_entries_per_storage int, prune_timeout time.Duration) *Histo
 		Clients: make(map[int32]*HistoryStorage),
 
 		PruneTimeout: prune_timeout,
+
+		CStateSize: c_state_size,
+		HStateSize: h_state_size,
 	}
+}
+
+func generate_client_index(owner_id, env_id int32) int32 {
+	return owner_id * 1000 + env_id
 }
 
 func (h *History) Append(n *halite_proto.HistoryEntry) {
@@ -174,7 +190,7 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 	h.Lock()
 	defer h.Unlock()
 
-	idx := n.OwnerId * 1000 + n.EnvId
+	idx := generate_client_index(n.OwnerId, n.EnvId)
 
 	hs, ok := h.Clients[idx]
 	if !ok {
@@ -202,11 +218,13 @@ func (h *History) Append(n *halite_proto.HistoryEntry) {
 }
 
 // fixed trajectory len
-func (h *History) Sample(trlen int, max_batch_size int, train_step int32) ([][]*Entry) {
+func (h *History) Sample(trlen int, max_batch_size int, train_step int32) ([][]*Entry, []int32, [][]float32, [][]float32) {
 	h.Lock()
 	defer h.Unlock()
 
 	episodes := make([]*list.List, 0, len(h.Clients))
+	active_clients := make([]int32, 0, len(h.Clients))
+
 	for _, hs := range h.Clients {
 		for _, trj_list := range hs.Entries {
 			trj_train_step := get_train_step(trj_list)
@@ -216,37 +234,59 @@ func (h *History) Sample(trlen int, max_batch_size int, train_step int32) ([][]*
 			}
 
 			episodes = append(episodes, trj_list)
+			active_clients = append(active_clients, generate_client_index(hs.OwnerId, hs.EnvId))
 		}
 	}
 
-	if len(episodes) == 0 {
-		return nil
+	if len(episodes) < max_batch_size {
+		return nil, nil, nil, nil
 	}
 
-	ret := make([][]*Entry, 0, max_batch_size)
-	for _, l := range episodes {
-		e := l.Back()
-		for i := 0; i < l.Len() / trlen; i += 1 {
-			trj := make([]*Entry, trlen, trlen)
+	ret_entries := make([][]*Entry, 0, max_batch_size)
 
-			for idx := trlen - 1; idx >= 0; idx -= 1 {
-				trj[idx] = e.Value.(*Entry)
+	client_indexes := make([]int32, 0, max_batch_size)
 
-				e = e.Prev()
-				if e == nil {
-					break
-				}
-			}
+	c_states := make([][]float32, 0, max_batch_size)
+	h_states := make([][]float32, 0, max_batch_size)
 
-			if trj[0] != nil {
-				ret = append(ret, trj)
-			}
+	for episode_idx, l := range episodes {
+		client_id := active_clients[episode_idx]
 
-			if len(ret) > max_batch_size {
-				break
-			}
+		e := l.Front()
+		trj := make([]*Entry, 0, trlen)
+
+		for idx := 0; idx < trlen; idx += 1 {
+			trj = append(trj, e.Value.(*Entry))
+
+			e = e.Next()
+		}
+
+		ret_entries = append(ret_entries, trj)
+		hs := h.Clients[client_id]
+		c_states = append(c_states, hs.c_state)
+		h_states = append(h_states, hs.h_state)
+
+		client_indexes = append(client_indexes, client_id)
+
+		if len(ret_entries) == max_batch_size {
+			break
 		}
 	}
 
-	return ret
+	return ret_entries, client_indexes, c_states, h_states
+}
+
+func (h *History) UpdateStates(states [][][]float32, indexes []int32) {
+	h.Lock()
+	defer h.Unlock()
+
+	for idx, client_id := range indexes {
+		hs, ok := h.Clients[client_id]
+		if !ok {
+			continue
+		}
+
+		hs.c_state = states[0][idx]
+		hs.h_state = states[1][idx]
+	}
 }

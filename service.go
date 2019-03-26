@@ -48,6 +48,9 @@ type ServiceContext struct {
 	learning_rate float32
 
 	service_name string
+
+	c_state_size int
+	h_state_size int
 }
 
 type BatchWrapper struct {
@@ -134,14 +137,14 @@ func (ctx *ServiceContext) TrainStep(_ctx context.Context, _ *halite_proto.Statu
 	return status, nil
 }
 
-func (ctx *ServiceContext) generate_batch() (map[string]*tf.Tensor, error){
+func (ctx *ServiceContext) generate_batch() (map[string]*tf.Tensor, []int32, error) {
 	start_time := time.Now()
 
-	batch := ctx.h.Sample(ctx.trlen, ctx.max_batch_size, int32(ctx.train_step))
-	if batch == nil || len(batch) < 20 {
+	batch, client_indexes, input_c_states, input_h_states := ctx.h.Sample(ctx.trlen, ctx.max_batch_size, int32(ctx.train_step))
+	if batch == nil || len(batch) != ctx.max_batch_size {
 		log.Infof("train_step: %d: there is no data, sleeping...", ctx.train_step)
 		time.Sleep(1 * time.Second)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	batch_sampling_time_ms := time.Since(start_time).Seconds() * 1000
@@ -178,35 +181,44 @@ func (ctx *ServiceContext) generate_batch() (map[string]*tf.Tensor, error){
 	var err error
 	input_tensors["input/map"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_states.NumSources())}, ctx.state_shape...), input_states.NewReader())
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
+		return nil, nil, fmt.Errorf("could not convert input state into tensor shape %v: %v", ctx.state_shape, err)
 	}
 	input_tensors["input/params"], err = tf.ReadTensor(tf.Float, append([]int64{int64(input_params.NumSources())}, ctx.params_shape...), input_params.NewReader())
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.params_shape, err)
+		return nil, nil, fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.params_shape, err)
 	}
 	input_tensors["input/policy_logits"], err = tf.NewTensor(input_logits)
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.logits_shape, err)
+		return nil, nil, fmt.Errorf("could not convert input params into tensor shape %v: %v", ctx.logits_shape, err)
 	}
 	input_tensors["input/action_taken"], err = tf.NewTensor(input_actions)
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input actions into tensor: %v", err)
+		return nil, nil, fmt.Errorf("could not convert input actions into tensor: %v", err)
 	}
 	input_tensors["input/done"], err = tf.NewTensor(input_dones)
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input dones into tensor: %v", err)
+		return nil, nil, fmt.Errorf("could not convert input dones into tensor: %v", err)
 	}
 	input_tensors["input/reward"], err = tf.NewTensor(input_rewards)
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input rewards into tensor: %v", err)
+		return nil, nil, fmt.Errorf("could not convert input rewards into tensor: %v", err)
 	}
 	input_tensors["input/time_steps"], err = tf.NewTensor(int32(ctx.trlen))
 	if err != nil {
-		return nil, fmt.Errorf("could not convert input time steps into tensor: %v", err)
+		return nil, nil, fmt.Errorf("could not convert input time steps into tensor: %v", err)
 	}
 	input_tensors["learning_rate_ph"], err = tf.NewTensor(ctx.learning_rate)
 	if err != nil {
-		return nil, fmt.Errorf("could not convert learning rate into tensor: %v", err)
+		return nil, nil, fmt.Errorf("could not convert learning rate into tensor: %v", err)
+	}
+
+	input_tensors["impala_rnn/input/c_state"], err = tf.NewTensor(input_c_states)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not convert input c_states into tensor: %v", err)
+	}
+	input_tensors["impala_rnn/input/h_state"], err = tf.NewTensor(input_h_states)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not convert input h_states into tensor: %v", err)
 	}
 
 	train_preparation_time_ms := time.Since(tensors_start_time).Seconds() * 1000
@@ -220,7 +232,7 @@ func (ctx *ServiceContext) generate_batch() (map[string]*tf.Tensor, error){
 			ctx.train_step, len(batch), batch_sampling_time_ms, train_preparation_time_ms,
 			num_entries, num_clients)
 
-	return input_tensors, nil
+	return input_tensors, client_indexes, nil
 }
 
 func (ctx *ServiceContext) train() error {
@@ -236,14 +248,16 @@ func (ctx *ServiceContext) train() error {
 	run.AddOutput("output/baseline_loss", DefaultConvert)
 	run.AddOutput("output/cross_entropy_loss", DefaultConvert)
 	run.AddOutput("output/total_loss", DefaultConvert)
+	run.AddOutput("impala_rnn/output/lstm_state", DefaultConvert)
 	run.AddTarget("output/train_op")
 
 	for {
 		start_time := time.Now()
 		var input_tensors map[string]*tf.Tensor
+		var client_indexes []int32
 
 		for {
-			input_tensors, err = ctx.generate_batch()
+			input_tensors, client_indexes, err = ctx.generate_batch()
 			if err != nil {
 				return err
 			}
@@ -270,7 +284,12 @@ func (ctx *ServiceContext) train() error {
 		_total_loss, err := run.Output("output/total_loss")
 		total_loss := _total_loss.(float32)
 
+		_lstm_state, err := run.Output("impala_rnn/output/lstm_state")
+		lstm_state := _lstm_state.([][][]float32)
+
 		train_time_ms := time.Since(train_start_time).Seconds() * 1000
+
+		ctx.h.UpdateStates(lstm_state, client_indexes)
 
 		log.Infof("%d: trjs: %d, policy_gradient_loss: %.2e, baseline_loss: %.2e, cross_entropy_loss: %.2e, total_loss: %.2e, " +
 			"tensor waiting: %.1f ms, train: %.1f ms",
@@ -331,7 +350,19 @@ func (ctx *ServiceContext) FillConfig() error {
 		return fmt.Errorf("could not find tensor %s: %v", tname, err)
 	}
 	ctx.logits_shape = res[0].Value().([]int64)
-	log.Infof("input: state shape: %v, params shape: %v, policy logits shape: %v", ctx.state_shape, ctx.params_shape, ctx.logits_shape)
+
+	tname = "impala_rnn/output/lstm_state_sizes"
+	res, err = GetTensorByName(slot.Graph(), slot.Session(), tname)
+	if err != nil {
+		return fmt.Errorf("could not find tensor %s: %v", tname, err)
+	}
+	state_sizes := res[0].Value().([]int32)
+
+	ctx.c_state_size = int(state_sizes[0])
+	ctx.h_state_size = int(state_sizes[1])
+
+	log.Infof("input: state shape: %v, params shape: %v, policy logits shape: %v, c_state_size: %d, h_state_size: %d",
+		ctx.state_shape, ctx.params_shape, ctx.logits_shape, ctx.c_state_size, ctx.h_state_size)
 
 	bwriter := bufio.NewWriter(&ctx.graph_buffer)
 	_, err = slot.Graph().WriteTo(bwriter)
@@ -375,7 +406,6 @@ func main() {
 	prune_timeout := time.Duration(srv_config.GetPruneOldClientsTimeoutSeconds()) * time.Second
 
 	ctx := &ServiceContext {
-		h: NewHistory(int(srv_config.GetMaxEntriesPerClient()), prune_timeout),
 		saver_def : []byte(saver_def),
 		train_dir: srv_config.GetTrainDir(),
 		trlen: int(srv_config.GetTrajectoryLen()),
@@ -396,6 +426,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("could not read config tensors: %v", err)
 	}
+
+	ctx.h = NewHistory(int(srv_config.GetMaxEntriesPerClient()), prune_timeout, ctx.c_state_size, ctx.h_state_size)
 
 	var opts []grpc.ServerOption
 	opts = append(opts, grpc.MaxRecvMsgSize(100*1024*1024))
