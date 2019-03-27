@@ -11,67 +11,11 @@ import (
 	"math"
 	"os"
 	"rndgit.msk/goservice/log"
-	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
-
-type ConversionFunction func(input interface{}) (interface{}, error)
-func DefaultConvert(input interface{}) (interface{}, error) {
-	return input, nil
-}
-
-func ConvertToArrayOfFloat32(input interface{}) (interface{}, error) {
-	x, ok := input.([][]float32)
-	if !ok {
-		return nil, fmt.Errorf("[][]float32 type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
-func ConvertToArrayOfInt32(input interface{}) (interface{}, error) {
-	x, ok := input.([][]int32)
-	if !ok {
-		return nil, fmt.Errorf("[][]float32 type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
-func ConvertToInt64(input interface{}) (interface{}, error) {
-	x, ok := input.([]int64)
-	if !ok {
-		return nil, fmt.Errorf("[]int64 type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
-func ConvertToInt32(input interface{}) (interface{}, error) {
-	x, ok := input.([]int32)
-	if !ok {
-		return nil, fmt.Errorf("[]int32 type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
-func ConvertToString(input interface{}) (interface{}, error) {
-	x, ok := input.([]string)
-	if !ok {
-		return nil, fmt.Errorf("[]string type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
-func ConvertToBool(input interface{}) (interface{}, error) {
-	x, ok := input.([]bool)
-	if !ok {
-		return nil, fmt.Errorf("[]bool type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
-func ConvertToFloat32(input interface{}) (interface{}, error) {
-	x, ok := input.([]float32)
-	if !ok {
-		return nil, fmt.Errorf("[]float32 type mismatch for input %v with type %v", input, reflect.TypeOf(input))
-	}
-	return x, nil
-}
 
 type SessionRun struct {
 	slot *ExecutionSlot
@@ -83,8 +27,6 @@ type SessionRun struct {
 type OutputOperation struct {
 	Name string
 	Output tf.Output
-
-	Convert ConversionFunction
 
 	Index int
 	Result interface{}
@@ -808,7 +750,7 @@ func (run *SessionRun) OutputNames() []string {
 	return run.slot.service_model.outputs
 }
 
-func (run *SessionRun) AddOutput(name string, convert ConversionFunction) error {
+func (run *SessionRun) AddOutput(name string) error {
 	op := run.slot.Graph().Operation(name)
 	if op == nil {
 		return fmt.Errorf("there is no output operation '%s'", name)
@@ -818,7 +760,6 @@ func (run *SessionRun) AddOutput(name string, convert ConversionFunction) error 
 		Name: name,
 		Output: op.Output(0),
 		Index: len(run.outputs),
-		Convert: convert,
 	}
 	run.output_operations[name] = out_op
 	run.outputs = append(run.outputs, out_op.Output)
@@ -852,17 +793,11 @@ func (run *SessionRun) check_and_convert(res []*tf.Tensor, op *OutputOperation) 
 		return fmt.Errorf("invalid number of results: %d, must be more than current operation's index %d", len(res), op.Index)
 	}
 
-	var err error
-	op.Result, err = op.Convert(res[op.Index].Value())
-	if err != nil {
-		return fmt.Errorf("%s: check/convert error: %v", op.Name, err)
-	}
-	//log.Infof("%s: converted: %v", op.Name, op.Result)
-
+	op.Result = res[op.Index].Value()
 	return nil
 }
 
-func (run *SessionRun) convert_results(res []*tf.Tensor) error {
+func (run *SessionRun) check_results(res []*tf.Tensor) error {
 	if len(res) != len(run.output_operations) {
 		return fmt.Errorf("invalid number of results: %d, must be equal to number of operations: %d", len(res), len(run.output_operations))
 	}
@@ -898,7 +833,7 @@ func (run *SessionRun) Run(input_tensors map[string]*tf.Tensor) error {
 		return fmt.Errorf("session.Run() returned unexpected response, there are %d outputs, must be %d, outputs: %+v", len(res), len(run.outputs), res)
 	}
 
-	err = run.convert_results(res)
+	err = run.check_results(res)
 	if err != nil {
 		return fmt.Errorf("conversion error between inputs and outputs: %v", err)
 	}
